@@ -59,26 +59,23 @@ const (
 	colFsUsage = "fs_usage"
 )
 
-func (self *influxdbStorage) getSeriesDefaultValues(
+func (self *influxdbStorage) getSerieName(
+	tableName string,
 	ref info.ContainerReference,
+	machineName string) string {
+	if len(ref.Aliases) > 0 {
+		return tableName + "." + machineName + "." + ref.Aliases[0]
+	}
+	return tableName + "." + machineName + "." + ref.Name
+}
+
+func (self *influxdbStorage) getSeriesDefaultValues(
 	stats *info.ContainerStats,
 	columns *[]string,
 	values *[]interface{}) {
 	// Timestamp
 	*columns = append(*columns, colTimestamp)
 	*values = append(*values, stats.Timestamp.UnixNano()/1E3)
-
-	// Machine name
-	*columns = append(*columns, colMachineName)
-	*values = append(*values, self.machineName)
-
-	// Container name
-	*columns = append(*columns, colContainerName)
-	if len(ref.Aliases) > 0 {
-		*values = append(*values, ref.Aliases[0])
-	} else {
-		*values = append(*values, ref.Name)
-	}
 }
 
 // In order to maintain a fixed column format, we add a new series for each filesystem partition.
@@ -88,10 +85,11 @@ func (self *influxdbStorage) containerFilesystemStatsToSeries(
 	if len(stats.Filesystem) == 0 {
 		return series
 	}
+	serieName := self.getSerieName(self.tableName, ref, self.machineName)
 	for _, fsStat := range stats.Filesystem {
 		columns := make([]string, 0)
 		values := make([]interface{}, 0)
-		self.getSeriesDefaultValues(ref, stats, &columns, &values)
+		self.getSeriesDefaultValues(stats, &columns, &values)
 
 		columns = append(columns, colFsDevice)
 		values = append(values, fsStat.Device)
@@ -101,16 +99,15 @@ func (self *influxdbStorage) containerFilesystemStatsToSeries(
 
 		columns = append(columns, colFsUsage)
 		values = append(values, fsStat.Usage)
-		series = append(series, self.newSeries(columns, values))
+		series = append(series, self.newSeries(serieName, columns, values))
 	}
 	return series
 }
 
 func (self *influxdbStorage) containerStatsToValues(
-	ref info.ContainerReference,
 	stats *info.ContainerStats,
 ) (columns []string, values []interface{}) {
-	self.getSeriesDefaultValues(ref, stats, &columns, &values)
+	self.getSeriesDefaultValues(stats, &columns, &values)
 	// Cumulative Cpu Usage
 	columns = append(columns, colCpuCumulativeUsage)
 	values = append(values, stats.Cpu.Usage.Total)
@@ -156,8 +153,11 @@ func (self *influxdbStorage) AddStats(ref info.ContainerReference, stats *info.C
 		// AddStats will be invoked simultaneously from multiple threads and only one of them will perform a write.
 		self.lock.Lock()
 		defer self.lock.Unlock()
-
-		self.series = append(self.series, self.newSeries(self.containerStatsToValues(ref, stats)))
+		serieName := self.getSerieName(self.tableName, ref, self.machineName)
+		var columns []string
+		var values []interface{}
+		columns, values = self.containerStatsToValues(stats)
+		self.series = append(self.series, self.newSeries(serieName, columns, values))
 		self.series = append(self.series, self.containerFilesystemStatsToSeries(ref, stats)...)
 		if self.readyToFlush() {
 			seriesToFlush = self.series
@@ -181,9 +181,9 @@ func (self *influxdbStorage) Close() error {
 }
 
 // Returns a new influxdb series.
-func (self *influxdbStorage) newSeries(columns []string, points []interface{}) *influxdb.Series {
+func (self *influxdbStorage) newSeries(serieName string, columns []string, points []interface{}) *influxdb.Series {
 	out := &influxdb.Series{
-		Name:    self.tableName,
+		Name:    serieName,
 		Columns: columns,
 		// There's only one point for each stats
 		Points: make([][]interface{}, 1),
